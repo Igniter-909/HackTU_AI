@@ -1,0 +1,17 @@
+python-nmap 
+scapy 
+python-whois 
+shodan 
+requests
+pandas 
+numpy
+matplotlib
+python-dotenv
+dnspython
+pyopenssl
+flask
+scikit-learn
+
+
+
+-e .
