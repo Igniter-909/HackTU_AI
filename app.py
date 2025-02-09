@@ -10,8 +10,32 @@ import subprocess
 import json
 from datetime import datetime, timedelta
 import os
+from flask_cors import CORS
+from src.HackTU.pipeline.chatbot_pinecone import PineconeChatbot
+from dotenv import load_dotenv
 
 app = Flask(__name__)
+
+# Add CORS support with proper configuration
+
+CORS(app, resources={
+    r"/*": {
+        "origins": ["http://localhost:3000", "http://127.0.0.1:3000", "http://172.16.85.30:3000"],
+        "methods": ["GET", "POST", "OPTIONS"],
+        "allow_headers": ["Content-Type", "Authorization"],
+        "expose_headers": ["Content-Type"],
+        "supports_credentials": True,
+        "max_age": 3600
+    }
+})
+
+# Add CORS preflight handler
+@app.after_request
+def after_request(response):
+    response.headers.add('Access-Control-Allow-Origin', '*')
+    response.headers.add('Access-Control-Allow-Headers', 'Content-Type,Authorization')
+    response.headers.add('Access-Control-Allow-Methods', 'GET,PUT,POST,DELETE,OPTIONS')
+    return response
 
 # Load APT detection models
 APT_MODEL_PATH = "models/aptDetection/apt_detection_model.pkl"
@@ -44,6 +68,17 @@ with open(PHISHING_LABEL_ENCODER_PATH, "rb") as le_file:
 
 print("All Models and Scalers Loaded Successfully!")
 
+# Load environment variables
+load_dotenv()
+
+# Initialize chatbot
+try:
+    chatbot = PineconeChatbot()
+    print("All Models and Scalers Loaded Successfully!")
+except Exception as e:
+    print(f"Error initializing chatbot: {str(e)}")
+    chatbot = None
+
 # Function to convert IP addresses to numeric format
 def ip_to_int(ip):
     try:
@@ -63,18 +98,21 @@ APT_SELECTED_FEATURES = [
 
 # Define the expected feature order for phishing detection
 PHISHING_FEATURES = [
-    "qty_dot_url", "qty_hyphen_url", "qty_underline_url", "qty_slash_url",
-    "qty_questionmark_url", "qty_equal_url", "qty_at_url", "qty_and_url",
-    "qty_exclamation_url", "qty_space_url", "domain_length", "qty_dot_domain",
-    "qty_hyphen_domain", "qty_underline_domain", "qty_vowels_domain",
-    "domain_in_ip", "directory_length", "qty_dot_directory",
-    "qty_hyphen_directory", "qty_underline_directory", "qty_slash_directory",
-    "file_length", "qty_dot_file", "qty_hyphen_file", "qty_underline_file",
-    "params_length", "qty_params", "qty_dot_params", "qty_hyphen_params",
-    "qty_underline_params", "qty_equal_params", "qty_and_params",
-    "qty_ip_resolved", "qty_nameservers", "qty_mx_servers",
-    "time_domain_activation", "time_domain_expiration", "tls_ssl_certificate",
-    "time_response", "url_google_index"
+    'domain_in_ip', 'length_url', 'length_url', 'qty_and_params',
+    'qty_and_url', 'qty_asterisk_url', 'qty_at_url', 'qty_comma_url',
+    'qty_dollar_url', 'qty_dot_directory', 'qty_dot_domain', 'qty_dot_file',
+    'qty_dot_file', 'qty_dot_params', 'qty_dot_url', 'qty_equal_params',
+    'qty_equal_url', 'qty_exclamation_url', 'qty_hashtag_url',
+    'qty_hyphen_directory', 'qty_hyphen_domain', 'qty_hyphen_file',
+    'qty_hyphen_params', 'qty_hyphen_url', 'qty_ip_resolved',
+    'qty_mx_servers', 'qty_nameservers', 'qty_params', 'qty_params',
+    'qty_percent_url', 'qty_plus_url', 'qty_questionmark_url',
+    'qty_slash_directory', 'qty_slash_url', 'qty_slash_url',
+    'qty_space_url', 'qty_tilde_url', 'qty_underline_directory',
+    'qty_underline_domain', 'qty_underline_file', 'qty_underline_params',
+    'qty_underline_url', 'qty_vowels_domain', 'time_domain_activation',
+    'time_domain_expiration', 'time_response', 'tls_ssl_certificate',
+    'url_google_index', 'url_google_index'
 ]
 
 @app.route("/", methods=["GET"])
@@ -106,36 +144,96 @@ def predict_apt():
     try:
         # Get JSON data from the request
         input_data = request.get_json()
+        print("Received data:", input_data)  # Debug print
 
-        # Convert JSON data to DataFrame
-        df_live = pd.DataFrame(input_data)
+        if not input_data:
+            return jsonify({
+                "error": "No data provided",
+                "message": "Request body is empty"
+            }), 400
 
-        # Convert IP addresses to numeric format
-        if "Src IP" in df_live.columns and "Dst IP" in df_live.columns:
-            df_live["Src IP"] = df_live["Src IP"].apply(ip_to_int)
-            df_live["Dst IP"] = df_live["Dst IP"].apply(ip_to_int)
+        try:
+            # Convert JSON data to DataFrame
+            if isinstance(input_data, list):
+                df_live = pd.DataFrame(input_data)
+            else:
+                df_live = pd.DataFrame([input_data])
+            
+            print("DataFrame shape:", df_live.shape)  # Debug print
+            print("DataFrame columns:", df_live.columns.tolist())  # Debug print
 
-        # Handle missing values
-        df_live.replace([np.inf, -np.inf], np.nan, inplace=True)
-        df_live.fillna(df_live.median(), inplace=True)
+            # Verify required features are present
+            missing_features = [feat for feat in APT_SELECTED_FEATURES if feat not in df_live.columns]
+            if missing_features:
+                return jsonify({
+                    "error": "Missing features",
+                    "message": f"Required features missing: {missing_features}"
+                }), 400
 
-        # Select required features
-        df_live = df_live[APT_SELECTED_FEATURES]
+            # Convert IP addresses to numeric format
+            if "Src IP" in df_live.columns and "Dst IP" in df_live.columns:
+                df_live["Src IP"] = df_live["Src IP"].apply(ip_to_int)
+                df_live["Dst IP"] = df_live["Dst IP"].apply(ip_to_int)
 
-        # Normalize data
-        X_live_scaled = apt_scaler.transform(df_live)
+            # Handle missing values
+            df_live.replace([np.inf, -np.inf], np.nan, inplace=True)
+            df_live.fillna(df_live.median(), inplace=True)
 
-        # Make predictions
-        predictions = apt_model.predict(X_live_scaled)
-        decoded_predictions = apt_label_encoder.inverse_transform(predictions)
+            # Select and order required features
+            df_live = df_live[APT_SELECTED_FEATURES]
 
-        return jsonify({
-            "predictions": decoded_predictions.tolist(),
-            "message": "APT detection completed successfully"
-        })
+            # Convert all columns to numeric
+            for col in df_live.columns:
+                df_live[col] = pd.to_numeric(df_live[col], errors='coerce')
+            df_live.fillna(0, inplace=True)
+
+            print("Processed DataFrame shape:", df_live.shape)  # Debug print
+
+            # Normalize data
+            X_live_scaled = apt_scaler.transform(df_live)
+
+            # Make predictions
+            predictions = apt_model.predict(X_live_scaled)
+            probabilities = apt_model.predict_proba(X_live_scaled)
+            decoded_predictions = apt_label_encoder.inverse_transform(predictions)
+
+            # Prepare response
+            results = []
+            for i, (pred, prob) in enumerate(zip(decoded_predictions, probabilities)):
+                results.append({
+                    "prediction": pred,
+                    "confidence": float(max(prob)),
+                    "index": i
+                })
+
+            return jsonify({
+                "status": "success",
+                "message": "APT detection completed successfully",
+                "predictions": results,
+                "data_shape": df_live.shape[0],
+                "features_used": df_live.columns.tolist()
+            })
+
+        except pd.errors.EmptyDataError:
+            return jsonify({
+                "error": "Data format error",
+                "message": "Empty or invalid data provided"
+            }), 400
+        except Exception as e:
+            return jsonify({
+                "error": "Processing error",
+                "message": str(e),
+                "data_info": {
+                    "columns": list(df_live.columns) if 'df_live' in locals() else None,
+                    "shape": df_live.shape if 'df_live' in locals() else None
+                }
+            }), 500
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        return jsonify({
+            "error": "Server error",
+            "message": str(e)
+        }), 500
 
 @app.route("/extract_url_features", methods=["POST"])
 def extract_url_features():
@@ -144,6 +242,7 @@ def extract_url_features():
         data = request.get_json()
         if not data or 'url' not in data:
             return jsonify({"error": "URL not provided"}), 400
+
 
         url = data['url']
 
@@ -171,9 +270,14 @@ def predict_phishing():
 
         # Convert to DataFrame
         df_real = pd.DataFrame([data])
+        print("Input DataFrame:", df_real)
 
         # Ensure correct feature order and missing values handling
         df_real = df_real.reindex(columns=PHISHING_FEATURES, fill_value=0)
+        print("Reindexed DataFrame:", df_real)
+
+        # Convert all numeric columns to float (to avoid int64 serialization issues)
+        df_real = df_real.astype(float)
 
         # Scale the input data
         X_real_scaled = phishing_scaler.transform(df_real)
@@ -185,14 +289,31 @@ def predict_phishing():
         # Convert prediction back to label
         predicted_label = phishing_label_encoder.inverse_transform(prediction)[0]
 
-        return jsonify({
-            "prediction": predicted_label,
-            "confidence": float(max(probability[0])),
-            "message": "Prediction completed successfully"
-        })
+        # Ensure all values are JSON serializable
+        response = {
+            "prediction": str(predicted_label),  # Convert to string
+            "confidence": float(max(probability[0])),  # Convert to float
+            "message": "Prediction completed successfully",
+            "features_used": df_real.columns.tolist(),
+            "feature_values": df_real.iloc[0].to_dict()  # Convert first row to dict
+        }
+
+        # Convert any remaining numpy types to Python types
+        response = json.loads(json.dumps(response, default=lambda x: float(x) if isinstance(x, np.number) else str(x)))
+
+        return jsonify(response)
 
     except Exception as e:
-        return jsonify({"error": str(e)}), 500
+        print(f"Error in predict_phishing: {str(e)}")  # Debug print
+        return jsonify({
+            "error": "Prediction error",
+            "message": str(e),
+            "data_info": {
+                "input_shape": df_real.shape if 'df_real' in locals() else None,
+                "input_columns": list(df_real.columns) if 'df_real' in locals() else None
+            }
+        }), 500
+
 @app.route("/analyze_system_logs", methods=["POST"])
 def analyze_system_logs():
     try:
@@ -283,6 +404,7 @@ def extract_system_logs():
                     logs['security'] = json.loads(security_logs)
                 except:
                     pass
+
         else:
             if log_types == 'all' or 'auth' in log_types:
                 try:
@@ -363,6 +485,45 @@ def extract_system_logs():
         return jsonify({
             "error": str(e),
             "message": "Failed to extract system logs"
+        }), 500
+
+@app.route('/chatbot/query', methods=['POST'])
+def process_query():
+    try:
+        if not chatbot:
+            return jsonify({
+                'status': 'error',
+                'message': 'Chatbot not initialized properly'
+            }), 500
+
+        # Get query from request
+        data = request.get_json()
+        if not data or 'query' not in data:
+            return jsonify({
+                'status': 'error',
+                'message': 'No query provided'
+            }), 400
+
+        query = data['query']
+        if not query.strip():
+            return jsonify({
+                'status': 'error',
+                'message': 'Empty query'
+            }), 400
+
+        # Generate response
+        response = chatbot.generate_response(query)
+
+        return jsonify({
+            'status': 'success',
+            'response': response
+        })
+
+    except Exception as e:
+        print(f"Error processing query: {str(e)}")
+        return jsonify({
+            'status': 'error',
+            'message': f'Error processing query: {str(e)}'
         }), 500
 
 if __name__ == "__main__":

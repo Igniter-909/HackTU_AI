@@ -6,12 +6,20 @@ requests
 pandas 
 numpy
 matplotlib
-python-dotenv
+python-dotenv==1.0.0
 dnspython
 pyopenssl
 flask
 scikit-learn
+flask-cors==4.0.0
+httpx>=0.24.1
 
+pinecone-client>=2.2.2
+langchain>=0.1.0
+langchain-community>=0.1.0
+sentence-transformers>=2.2.2
+pypdf>=3.15.1
 
+google-generativeai>=0.3.0
 
 -e .
